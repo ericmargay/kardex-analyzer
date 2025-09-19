@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Descifrador Kardex — v5.1 (auto + simulación cronológica)</title>
+  <style>
+    :root{ --bg:#0b0f14; --fg:#e6eef7; --muted:#a7b3c2; --card:#121821; --accent:#65b7ff; --good:#35c28d; --warn:#ffd166; }
+    *{box-sizing:border-box}
+    body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Ubuntu,Arial; background:var(--bg); color:var(--fg);}
+    header{padding:28px 20px; background:linear-gradient(180deg,#0d1621,transparent); border-bottom:1px solid #1f2a3a}
+    h1{margin:0 0 6px; font-size:28px; letter-spacing:.3px}
+    p.sub{margin:0; color:var(--muted)}
+    main{max-width:1100px; margin:0 auto; padding:22px}
+    .row{display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:12px 0}
+    input[type=file]{background:var(--card); border:1px solid #223146; border-radius:12px; padding:12px; color:var(--muted);}
+    .badge{background:#1e2a3a; border:1px solid #2a3a51; padding:6px 10px; border-radius:999px; font-size:12px; color:#cfe6ff}
+    .drop{border:2px dashed #2a3a51; border-radius:12px; padding:16px; color:#9fb6d6; text-align:center}
+    .drop.drag{border-color:#65b7ff; color:#cfe6ff; background:#0e1622}
+    .status{min-height:24px}
+    .cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; margin:18px 0}
+    .card{background:var(--card); border:1px solid #1f2a3a; border-radius:16px; padding:16px}
+    .k{color:var(--muted); font-size:12px; letter-spacing:.4px; text-transform:uppercase}
+    .v{font-size:26px; font-weight:800; margin-top:4px}
+    .good{color:var(--good)}
+    details{background:var(--card); border:1px solid #1f2a3a; border-radius:14px; padding:10px 14px; margin:10px 0 18px}
+    details[open]{padding-bottom:18px}
+    summary{cursor:pointer; font-weight:600}
+    table{width:100%; border-collapse:collapse; overflow:auto; font-size:14px}
+    th,td{padding:10px 8px; border-bottom:1px solid #1f2a3a; vertical-align:top}
+    th{position:sticky; top:0; background:#0f1722; text-align:left}
+    #log{white-space:pre-wrap; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; background:#0f1824; border:1px solid #1f2a3a; border-radius:12px; padding:10px; max-height:240px; overflow:auto; color:#b5d0ff}
+    .hidden{display:none}
+    .pill{display:inline-block; padding:3px 8px; border-radius:999px; border:1px solid #27405d; background:#152334; font-size:12px; color:#cfe6ff}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Descifrador Kardex</h1>
+    <p class="sub">v5.1 — Procesa al subir/arrastrar. El <b>saldo</b> se calcula simulando movimientos en orden cronológico.</p>
+  </header>
+  <main>
+    <div class="row">
+      <input type="file" id="file" accept="application/pdf" />
+      <span id="badge" class="badge">Sin archivo</span>
+      <span id="status" class="sub status"></span>
+    </div>
+    <div id="drop" class="drop">o arrastra aquí tu PDF…</div>
+
+    <div id="results" class="hidden">
+      <div class="cards">
+        <div class="card"><div class="k">Generados (otorgados + proporciones)</div><div class="v" id="v-generados">—</div></div>
+        <div class="card"><div class="k">Tomados</div><div class="v" id="v-tomados">—</div></div>
+        <div class="card"><div class="k">Saldo</div><div class="v good" id="v-saldo">—</div></div>
+      </div>
+
+      <details open>
+        <summary>Movimientos detectados <span id="audit" class="pill"></span></summary>
+        <div style="overflow:auto; max-height:520px; margin-top:10px">
+          <table id="movs">
+            <thead><tr>
+              <th>Concepto</th><th>Fecha registro</th><th>Fecha inicial</th><th>Fecha final</th>
+              <th>Tomadas</th><th>Con derecho</th><th>Saldo (simulado)</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+
+    <details>
+      <summary>Registro técnico</summary>
+      <div id="log"></div>
+    </details>
+  </main>
+
+  <!-- pdf.js (UMD) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";</script>
+  <!-- Tesseract.js (OCR) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const $ = id => document.getElementById(id);
+      const fileInput = $('file');
+      const drop = $('drop');
+      const badge = $('badge');
+      const statusEl = $('status');
+      const results = $('results');
+      const vGenerados = $('v-generados');
+      const vTomados = $('v-tomados');
+      const vSaldo = $('v-saldo');
+      const tbody = document.querySelector('#movs tbody');
+      const logEl = $('log');
+      const audit = $('audit');
+
+      function log(){ 
+        const a = Array.from(arguments).map(x=>typeof x==='string'?x:JSON.stringify(x));
+        console.log.apply(console, arguments);
+        logEl.textContent += a.join(' ') + "\n"; 
+      }
+      const esc = s => (s??'').toString().replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+      const toNum = x => parseFloat((x||'').replace(',','.'));
+      const parseDate = s => {
+        if(!s) return new Date(0);
+        const [d,m,y] = s.split('/').map(Number);
+        const dt = new Date(y,(m-1),d);
+        return isNaN(+dt) ? new Date(0) : dt;
+      };
+
+      // re-seleccionar mismo archivo
+      fileInput.addEventListener('click', ()=>{ fileInput.value=''; });
+
+      fileInput.addEventListener('change', () => {
+        const f = fileInput.files?.[0];
+        if (f){ badge.textContent = f.name; runPipeline(f); }
+      });
+
+      // Drag & drop
+      ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();drop.classList.add('drag');}));
+      ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();drop.classList.remove('drag');}));
+      drop.addEventListener('drop',(e)=>{
+        const f = e.dataTransfer.files?.[0];
+        if (f){ fileInput.files = e.dataTransfer.files; badge.textContent=f.name; runPipeline(f); }
+      });
+
+      async function runPipeline(file){
+        try{
+          results.classList.add('hidden');
+          statusEl.textContent = 'Extrayendo texto con pdf.js…';
+          log('► Inicio pipeline, archivo:', file.name);
+
+          const buf = await file.arrayBuffer();
+          let text = await extractTextFromPDF(buf);
+          log('Texto (len):', text.length);
+
+          let parsed = parseKardexPreciso(text);
+
+          if (!text || text.length < 30 || (parsed.rows||[]).length === 0){
+            statusEl.textContent = 'No hay texto suficiente. Intentando OCR…';
+            text = await ocrAllPagesWithPdfjs(buf);
+            log('OCR texto (len):', text.length);
+            parsed = parseKardexPreciso(text);
+          }
+
+          // Simulación cronológica
+          const sim = simulateLedger(parsed.rows);
+          const generados = +sim.generados.toFixed(3);
+          const tomados = +sim.tomados.toFixed(3);
+          const saldoFinal = +sim.saldo.toFixed(3);
+
+          vGenerados.textContent = generados.toLocaleString('es-MX');
+          vTomados.textContent = tomados.toLocaleString('es-MX');
+          vSaldo.textContent = saldoFinal.toLocaleString('es-MX');
+
+          tbody.innerHTML = '';
+          for (const r of sim.rowsSim){
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>${esc(r.concepto)}</td>
+              <td>${esc(r.registro)}</td>
+              <td>${esc(r.inicial)}</td>
+              <td>${esc(r.final)}</td>
+              <td>${esc(r.tomadas ?? '')}</td>
+              <td>${esc(r.conDerecho ?? '')}</td>
+              <td>${esc(r.saldoSim.toFixed(3))}</td>
+            `;
+            tbody.appendChild(tr);
+          }
+
+          audit.textContent = 'Auditoría: Generados=' + generados + ' · Tomados=' + tomados + ' · Saldo (sim)=' + saldoFinal;
+
+          statusEl.textContent = 'Listo.';
+          results.classList.remove('hidden');
+        }catch(e){
+          console.error(e); log('ERROR pipeline:', e && e.message ? e.message : e);
+          statusEl.textContent = 'No pude interpretar el PDF.';
+        }
+      }
+
+      async function extractTextFromPDF(arrayBuffer){
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        log('Páginas:', pdf.numPages);
+        let text='';
+        for (let p=1; p<=pdf.numPages; p++){
+          const page = await pdf.getPage(p);
+          const content = await page.getTextContent({ normalizeWhitespace:true });
+          text += content.items.map(it=>it.str).join(' ') + '\n';
+        }
+        return text.replace(/\u00A0/g,' ').replace(/\s+/g,' ').trim();
+      }
+
+      async function ocrAllPagesWithPdfjs(arrayBuffer){
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        let fullText='';
+        for (let p=1; p<=pdf.numPages; p++){
+          const page = await pdf.getPage(p);
+          const viewport = page.getViewport({ scale: 2 });
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d', { willReadFrequently:true });
+          canvas.width = viewport.width; canvas.height = viewport.height;
+          await page.render({ canvasContext: ctx, viewport }).promise;
+          const dataUrl = canvas.toDataURL('image/png');
+          const o = await Tesseract.recognize(dataUrl, 'spa+eng', {
+            logger: function(m){ if (m && m.status) { log('OCR p' + p + ': ' + m.status + ' ' + ((m.progress*100)|0) + '%'); } }
+          });
+          var text = o && o.data && o.data.text ? o.data.text : '';
+          fullText += '\n' + text;
+        }
+        return fullText.replace(/\u00A0/g,' ').replace(/\s+/g,' ').trim();
+      }
+
+      // --------- Parser (por fila) ----------
+      function parseKardexPreciso(text){
+        const rows=[];
+
+        // Vacaciones tomadas: 3 fechas + tomadas + saldo
+        const reVac=/Vacaciones tomadas\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)/g;
+        let m; 
+        while((m=reVac.exec(text))){
+          const fr=m[1], fi=m[2], ff=m[3], t=m[4], s=m[5];
+          rows.push({concepto:'Vacaciones tomadas', registro:fr, inicial:fi, final:ff, tomadas:toNum(t), conDerecho:null, saldoPDF:toNum(s)});
+        }
+
+        // Aniversario: registro + con derecho + saldo
+        const reAniv=/Aniversario laboral al finalizar la jornada\s*(\d{2}\/\d{2}\/\d{4})?\s+(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)/g;
+        while((m=reAniv.exec(text))){
+          const fr=m[1], cd=m[2], s=m[3];
+          rows.push({concepto:'Aniversario laboral al finalizar la jornada', registro:fr||'', inicial:'', final:'', tomadas:null, conDerecho:toNum(cd), saldoPDF:toNum(s)});
+        }
+
+        // Proporción último año
+        const reProp=/Proporción último año\s+(\d{2}\/\d{2}\/\d{4})\s+(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)/g;
+        while((m=reProp.exec(text))){
+          const fr=m[1], cd=m[2], s=m[3];
+          rows.push({concepto:'Proporción último año', registro:fr, inicial:'', final:'', tomadas:null, conDerecho:toNum(cd), saldoPDF:toNum(s)});
+        }
+
+        // Ajuste inicial
+        const reAntes=/Vac\. tomadas antes del registro del empleado\s+(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)/g;
+        while((m=reAntes.exec(text))){
+          const t=m[1], s=m[2];
+          rows.push({concepto:'Vac. tomadas antes del registro del empleado', registro:'', inicial:'', final:'', tomadas:toNum(t), conDerecho:null, saldoPDF:toNum(s)});
+        }
+
+        return { rows };
+      }
+
+      // --------- Simulación cronológica ----------
+      function simulateLedger(rows){
+        // Orden cronológico por Registro -> Inicial -> Final
+        const copy = rows.map((r,i)=>({
+          ...r,
+          _idx:i,
+          _date: pickDate(r)
+        })).sort((a,b)=> a._date - b._date || a._idx - b._idx);
+
+        let saldo = 0, gen = 0, tom = 0;
+        const rowsSim = [];
+
+        for (const r of copy){
+          if (r.concepto.startsWith('Aniversario') || r.concepto.startsWith('Proporción')){
+            const add = r.conDerecho || 0;
+            gen += add;
+            saldo += add;
+            rowsSim.push({...prettyRow(r), saldoSim: saldo});
+          } else if (r.concepto.startsWith('Vacaciones tomadas') || r.concepto.startsWith('Vac. tomadas antes')){
+            const sub = r.tomadas || 0;
+            tom += sub;
+            saldo -= sub;
+            rowsSim.push({...prettyRow(r), saldoSim: saldo});
+          } else {
+            rowsSim.push({...prettyRow(r), saldoSim: saldo});
+          }
+        }
+
+        return { generados: gen, tomados: tom, saldo, rowsSim };
+
+        function pickDate(r){
+          if (r.registro) return parseDate(r.registro);
+          if (r.inicial)  return parseDate(r.inicial);
+          if (r.final)    return parseDate(r.final);
+          return new Date(0);
+        }
+        function prettyRow(r){
+          return {
+            concepto: r.concepto,
+            registro: r.registro || '',
+            inicial: r.inicial || '',
+            final: r.final || '',
+            tomadas: r.tomadas!=null ? r.tomadas.toFixed(3) : '',
+            conDerecho: r.conDerecho!=null ? r.conDerecho.toFixed(3) : ''
+          };
+        }
+      }
+    });
+  </script>
+</body>
+</html>
